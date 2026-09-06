@@ -7,10 +7,11 @@ import re
 import time
 import json
 import logging
-import sqlite3
+# import sqlite3
+import psycopg2
+import psycopg2.extras 
 from datetime import datetime
 from dotenv import load_dotenv
-
 import telebot
 from telebot import types
 
@@ -25,8 +26,12 @@ BONUS_PERCENT = int(os.getenv("BONUS_PERCENT", 5))
 BANK_CARD = os.getenv("BANK_CARD", "5022291331447233")
 BANK_OWNER = os.getenv("BANK_OWNER", "ایمان سردار راد")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8904951204:AAFS8Ae27-xuBSfarkDLyTm1nMbNB2v6dQo").strip()
+DATABASE_URL = os.getenv("DATABASE_URL")   # ✅ این خط رو حتماً اضافه کن
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN در Environment Variables تنظیم نشده است.")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL در Environment Variables تنظیم نشده است!")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 bot.delete_webhook()
