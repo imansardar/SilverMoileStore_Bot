@@ -44,29 +44,28 @@ def get_db():
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS apple_ids (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            apple_id TEXT UNIQUE,
-            password TEXT,
-            birth_date TEXT,
-            school TEXT,
-            job TEXT,
-            parentsmeet TEXT,
-            security_q1 TEXT,
-            security_a1 TEXT,
-            security_q2 TEXT,
-            security_a2 TEXT,
-            security_q3 TEXT,
-            security_a3 TEXT,
-            product_type TEXT DEFAULT 'ready',
-            icloud_status TEXT DEFAULT 'with_icloud',
-            warranty_type TEXT DEFAULT '31days',
-            used INTEGER DEFAULT 0,
-            user_id INTEGER DEFAULT NULL,
-            date_used TEXT DEFAULT NULL
-        )
-    ''')
+    CREATE TABLE IF NOT EXISTS apple_ids (
+    id SERIAL PRIMARY KEY,
+    apple_id TEXT UNIQUE,
+    password TEXT,
+    birth_date TEXT,
+    school TEXT,
+    job TEXT,
+    parentsmeet TEXT,
+    security_q1 TEXT,
+    security_a1 TEXT,
+    security_q2 TEXT,
+    security_a2 TEXT,
+    security_q3 TEXT,
+    security_a3 TEXT,
+    product_type TEXT DEFAULT 'ready',
+    icloud_status TEXT DEFAULT 'with_icloud',
+    warranty_type TEXT DEFAULT '31days',
+    used INTEGER DEFAULT 0,
+    user_id INTEGER DEFAULT NULL,
+    date_used TEXT DEFAULT NULL
+);
+    
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS emails (
