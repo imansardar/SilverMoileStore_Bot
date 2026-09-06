@@ -40,10 +40,16 @@ logger = logging.getLogger(__name__)
 DB_PATH = "sardar_app_store.db"
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL is not set")
+    conn = psycopg2.connect(DATABASE_URL)
+    return conndef get_db():
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL is not set")
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS apple_ids (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
