@@ -7,7 +7,6 @@ import re
 import time
 import json
 import logging
-import sqlite3
 from datetime import datetime
 from dotenv import load_dotenv
 
