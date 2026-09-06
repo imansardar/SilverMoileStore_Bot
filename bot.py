@@ -19,6 +19,8 @@ load_dotenv()
 # ============================================================
 # ⚙️ تنظیمات اولیه (از محیط)
 # ============================================================
+import subprocess
+subprocess.run([sys.executable, '-m', 'pip', 'install', 'python-dotenv'], check=True, shell=False)
 ADMIN_ID = int(os.getenv("ADMIN_ID", 8915086212))
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@StoreSardaarApple")
 BONUS_PERCENT = int(os.getenv("BONUS_PERCENT", 5))
