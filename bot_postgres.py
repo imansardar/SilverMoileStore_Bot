@@ -7,7 +7,8 @@ import re
 import time
 import json
 import logging
-import sqlite3
+import psycopg
+from psycopg.rows import dict_row
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -24,7 +25,7 @@ CHANNEL_ID = os.getenv("CHANNEL_ID", "@StoreSardaarApple")
 BONUS_PERCENT = int(os.getenv("BONUS_PERCENT", 5))
 BANK_CARD = os.getenv("BANK_CARD", "5022291331447233")
 BANK_OWNER = os.getenv("BANK_OWNER", "ایمان سردار راد")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8904951204:AAFS8Ae27-xuBSfarkDLyTm1nMbNB2v6dQo").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN در Environment Variables تنظیم نشده است.")
 
@@ -35,156 +36,139 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 💾 دیتابیس SQLite (با ساختار اصلاح‌شده)
+# 🐘 دیتابیس دائمی PostgreSQL
 # ============================================================
-DB_PATH = "sardar_app_store.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL در Environment Variables تنظیم نشده است.")
+
+class CompatRow(dict):
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return tuple(self.values())[key]
+        return super().__getitem__(key)
+
+class CompatCursor:
+    def __init__(self, cursor):
+        self._cursor = cursor
+    @staticmethod
+    def _sql(sql):
+        return sql.replace("?", "%s").replace("BEGIN IMMEDIATE", "BEGIN")
+    def execute(self, sql, params=None):
+        return self._cursor.execute(self._sql(sql), params)
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        return CompatRow(row) if row is not None else None
+    def fetchall(self):
+        return [CompatRow(row) for row in self._cursor.fetchall()]
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+class CompatConnection:
+    def __init__(self, conn):
+        self._conn = conn
+    def cursor(self):
+        return CompatCursor(self._conn.cursor(row_factory=dict_row))
+    def commit(self):
+        self._conn.commit()
+    def rollback(self):
+        self._conn.rollback()
+    def close(self):
+        self._conn.close()
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    return CompatConnection(psycopg.connect(DATABASE_URL, connect_timeout=15, application_name="SardarTelegramBot"))
+
+def init_database():
+    conn = get_db()
     cursor = conn.cursor()
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS apple_ids (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            apple_id TEXT UNIQUE,
-            password TEXT,
-            birth_date TEXT,
-            school TEXT,
-            job TEXT,
-            parentsmeet TEXT,
-            security_q1 TEXT,
-            security_a1 TEXT,
-            security_q2 TEXT,
-            security_a2 TEXT,
-            security_q3 TEXT,
-            security_a3 TEXT,
-            product_type TEXT DEFAULT 'ready',
-            icloud_status TEXT DEFAULT 'with_icloud',
-            warranty_type TEXT DEFAULT '31days',
-            used INTEGER DEFAULT 0,
-            user_id INTEGER DEFAULT NULL,
-            date_used TEXT DEFAULT NULL
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS emails (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE,
-            password TEXT,
-            used INTEGER DEFAULT 0,
-            user_id INTEGER DEFAULT NULL,
-            date_used TEXT DEFAULT NULL
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            balance INTEGER DEFAULT 0,
-            join_date TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            phone TEXT,
-            email TEXT,
-            birth_date TEXT
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_purchases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            order_id INTEGER UNIQUE,
-            product_type TEXT,
-            product_detail TEXT,
-            password TEXT,
-            purchase_date TEXT,
-            status TEXT DEFAULT 'pending'
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS failed_purchases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            product_type TEXT,
-            price INTEGER,
-            reason TEXT,
-            date TEXT
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS bot_settings (
-            setting_key TEXT PRIMARY KEY,
-            setting_value TEXT
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS temp_orders (
-            order_id INTEGER PRIMARY KEY,
-            user_id INTEGER,
-            product_name TEXT,
-            price INTEGER,
-            email TEXT,
-            email_option TEXT,
-            is_for_apple INTEGER DEFAULT 0,
-            photo_id TEXT,
-            status TEXT DEFAULT 'waiting_payment',
-            created_at TEXT,
-            updated_at TEXT,
-            icloud_status TEXT,
-            warranty_type TEXT,
-            order_type TEXT DEFAULT 'product'
-        )
-    ''')
-
-    # مهاجرت دیتابیس برای نسخه‌های قدیمی
-    # سفارش افزایش موجودی با order_type=balance از سفارش محصول کاملاً جدا می‌شود.
     try:
-        cursor.execute("ALTER TABLE temp_orders ADD COLUMN order_type TEXT DEFAULT 'product'")
-    except sqlite3.OperationalError:
-        pass  # ستون از قبل وجود دارد
-
-    # سفارش‌های قدیمی که نامشان افزایش موجودی است نیز به‌عنوان balance علامت‌گذاری شوند.
-    try:
-        cursor.execute("UPDATE temp_orders SET order_type = 'balance' WHERE TRIM(product_name) = 'افزایش موجودی' AND (order_type IS NULL OR order_type = 'product')")
-    except sqlite3.OperationalError:
-        pass
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS warranty_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            apple_id TEXT,
-            request_date TEXT,
-            status TEXT DEFAULT 'pending'
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS unlock_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            apple_id TEXT,
-            password TEXT,
-            email TEXT,
-            email_password TEXT,
-            request_date TEXT,
-            status TEXT DEFAULT 'pending'
-        )
-    ''')
-
-    cursor.execute("INSERT OR IGNORE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)", ("card_number", BANK_CARD))
-    cursor.execute("INSERT OR IGNORE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)", ("card_owner", BANK_OWNER))
-    cursor.execute("INSERT OR IGNORE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)", ("bonus_percent", str(BONUS_PERCENT)))
-    cursor.execute("INSERT OR IGNORE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)", ("last_order_id", "1000"))
-
-    conn.commit()
-    return conn
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS apple_ids (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                apple_id TEXT UNIQUE, password TEXT, birth_date TEXT, school TEXT,
+                job TEXT, parentsmeet TEXT, security_q1 TEXT, security_a1 TEXT,
+                security_q2 TEXT, security_a2 TEXT, security_q3 TEXT, security_a3 TEXT,
+                product_type TEXT DEFAULT 'ready', icloud_status TEXT DEFAULT 'with_icloud',
+                warranty_type TEXT DEFAULT '31days', used INTEGER DEFAULT 0,
+                user_id BIGINT DEFAULT NULL, date_used TEXT DEFAULT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS emails (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                email TEXT UNIQUE, password TEXT, used INTEGER DEFAULT 0,
+                user_id BIGINT DEFAULT NULL, date_used TEXT DEFAULT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY, balance BIGINT DEFAULT 0, join_date TEXT,
+                first_name TEXT, last_name TEXT, phone TEXT, email TEXT, birth_date TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_purchases (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                user_id BIGINT, order_id BIGINT UNIQUE, product_type TEXT,
+                product_detail TEXT, password TEXT, purchase_date TEXT,
+                status TEXT DEFAULT 'pending'
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS failed_purchases (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                user_id BIGINT, product_type TEXT, price BIGINT, reason TEXT, date TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                setting_key TEXT PRIMARY KEY, setting_value TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS temp_orders (
+                order_id BIGINT PRIMARY KEY, user_id BIGINT, product_name TEXT,
+                price BIGINT, email TEXT, email_option TEXT, is_for_apple INTEGER DEFAULT 0,
+                photo_id TEXT, status TEXT DEFAULT 'waiting_payment', created_at TEXT,
+                updated_at TEXT, icloud_status TEXT, warranty_type TEXT,
+                order_type TEXT DEFAULT 'product'
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS warranty_requests (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                user_id BIGINT, apple_id TEXT, request_date TEXT, status TEXT DEFAULT 'pending'
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS unlock_requests (
+                id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                user_id BIGINT, apple_id TEXT, password TEXT, email TEXT,
+                email_password TEXT, request_date TEXT, status TEXT DEFAULT 'pending'
+            )
+        """)
+        cursor.execute("INSERT INTO bot_settings (setting_key, setting_value) VALUES (?, ?) ON CONFLICT (setting_key) DO NOTHING", ("card_number", BANK_CARD))
+        cursor.execute("INSERT INTO bot_settings (setting_key, setting_value) VALUES (?, ?) ON CONFLICT (setting_key) DO NOTHING", ("card_owner", BANK_OWNER))
+        cursor.execute("INSERT INTO bot_settings (setting_key, setting_value) VALUES (?, ?) ON CONFLICT (setting_key) DO NOTHING", ("bonus_percent", str(BONUS_PERCENT)))
+        cursor.execute("INSERT INTO bot_settings (setting_key, setting_value) VALUES (?, ?) ON CONFLICT (setting_key) DO NOTHING", ("last_order_id", "1000"))
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_temp_orders_user_status ON temp_orders(user_id, status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_emails_unused ON emails(used) WHERE used = 0")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_apple_unused ON apple_ids(used) WHERE used = 0")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_purchases_user ON user_purchases(user_id)")
+        conn.commit()
+        logger.info("✅ PostgreSQL database initialized successfully.")
+    except Exception:
+        conn.rollback()
+        logger.exception("❌ خطا در ساخت جداول PostgreSQL")
+        raise
+    finally:
+        conn.close()
 
 # ============================================================
 # 📊 توابع مدیریت تنظیمات
@@ -210,20 +194,23 @@ def update_setting(key, value):
 def get_next_order_id():
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT setting_value FROM bot_settings WHERE setting_key = 'last_order_id'")
-    result = cursor.fetchone()
-    if result:
-        current_id = int(result[0])
-        new_id = current_id + 1
-        cursor.execute("UPDATE bot_settings SET setting_value = ? WHERE setting_key = 'last_order_id'", (str(new_id),))
+    try:
+        cursor.execute("SELECT setting_value FROM bot_settings WHERE setting_key = 'last_order_id' FOR UPDATE")
+        result = cursor.fetchone()
+        if result:
+            new_id = int(result[0]) + 1
+            cursor.execute("UPDATE bot_settings SET setting_value = ? WHERE setting_key = 'last_order_id'", (str(new_id),))
+        else:
+            new_id = 1001
+            cursor.execute("INSERT INTO bot_settings (setting_key, setting_value) VALUES (?, ?) ON CONFLICT (setting_key) DO NOTHING", ("last_order_id", str(new_id)))
         conn.commit()
-        conn.close()
         return new_id
-    else:
-        cursor.execute("INSERT INTO bot_settings (setting_key, setting_value) VALUES (?, ?)", ("last_order_id", "1001"))
-        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("خطا در ساخت شماره سفارش جدید")
+        raise
+    finally:
         conn.close()
-        return 1001
 
 def payment_markup(order_id):
     """روش‌های پرداخت بانکی؛ برای شارژ کیف پول استفاده می‌شود."""
@@ -267,8 +254,8 @@ def pay_order_with_balance(order_id, user_id):
     conn = get_db()
     try:
         cursor = conn.cursor()
-        cursor.execute("BEGIN IMMEDIATE")
-        cursor.execute("SELECT * FROM temp_orders WHERE order_id = ? AND user_id = ?", (order_id, user_id))
+        cursor.execute("BEGIN")
+        cursor.execute("SELECT * FROM temp_orders WHERE order_id = ? AND user_id = ? FOR UPDATE", (order_id, user_id))
         row = cursor.fetchone()
         if not row:
             conn.rollback()
@@ -287,14 +274,12 @@ def pay_order_with_balance(order_id, user_id):
             conn.rollback()
             return False, "invalid_price", temp, None
 
-        cursor.execute("""
-            UPDATE users
-            SET balance = balance - ?
-            WHERE user_id = ? AND balance >= ?
-        """, (price, user_id, price))
-        if cursor.rowcount != 1:
+        cursor.execute("SELECT balance FROM users WHERE user_id = ? FOR UPDATE", (user_id,))
+        balance_row = cursor.fetchone()
+        if not balance_row or int(balance_row[0] or 0) < price:
             conn.rollback()
             return False, "insufficient_balance", temp, None
+        cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (price, user_id))
 
         cursor.execute("""
             UPDATE temp_orders
@@ -448,9 +433,15 @@ def add_new_user(user_id, first_name="", last_name="", phone="", email="", birth
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute(
-        """INSERT OR IGNORE INTO users 
-        (user_id, balance, join_date, first_name, last_name, phone, email, birth_date) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO users
+        (user_id, balance, join_date, first_name, last_name, phone, email, birth_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (user_id) DO UPDATE SET
+            first_name = EXCLUDED.first_name,
+            last_name = EXCLUDED.last_name,
+            phone = CASE WHEN EXCLUDED.phone <> '' THEN EXCLUDED.phone ELSE users.phone END,
+            email = CASE WHEN EXCLUDED.email <> '' THEN EXCLUDED.email ELSE users.email END,
+            birth_date = CASE WHEN EXCLUDED.birth_date <> '' THEN EXCLUDED.birth_date ELSE users.birth_date END""",
         (user_id, 0, time.strftime("%Y-%m-%d %H:%M:%S"), first_name, last_name, phone, email, birth_date)
     )
     conn.commit()
@@ -497,9 +488,13 @@ def create_purchase_record(user_id, order_id, product_type, product_detail, pass
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute(
-        """INSERT OR IGNORE INTO user_purchases 
-        (user_id, order_id, product_type, product_detail, password, purchase_date, status) 
-        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO user_purchases
+        (user_id, order_id, product_type, product_detail, password, purchase_date, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (order_id) DO UPDATE SET
+            product_type = EXCLUDED.product_type,
+            product_detail = CASE WHEN EXCLUDED.product_detail <> '' THEN EXCLUDED.product_detail ELSE user_purchases.product_detail END,
+            password = CASE WHEN EXCLUDED.password <> '' THEN EXCLUDED.password ELSE user_purchases.password END""",
         (user_id, order_id, product_type, product_detail, password, time.strftime("%Y-%m-%d %H:%M:%S"), "pending")
     )
     conn.commit()
@@ -2511,13 +2506,34 @@ def back_button(message):
     back_to_main(message)
 
 # ============================================================
+# 🩺 تست PostgreSQL توسط ادمین
+# ============================================================
+@bot.message_handler(commands=["dbcheck"])
+def dbcheck(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        conn = get_db(); cursor = conn.cursor()
+        counts = {}
+        for table, label in [("users","کاربران"),("temp_orders","سفارش‌ها"),("apple_ids","اپل‌آیدی‌ها"),("emails","ایمیل‌ها")]:
+            cursor.execute(f"SELECT COUNT(*) AS c FROM {table}")
+            counts[label] = cursor.fetchone()[0]
+        conn.close()
+        bot.send_message(ADMIN_ID, "🩺 وضعیت PostgreSQL\n\n" + "\n".join(f"{k}: {v}" for k,v in counts.items()))
+    except Exception as e:
+        logger.exception("DBCHECK failed")
+        bot.send_message(ADMIN_ID, f"❌ خطای دیتابیس: {e}")
+
+# ============================================================
 # 🏃 اجرای ربات
 # ============================================================
 if __name__ == "__main__":
     print("\n========================================")
     print("✅ SARDAR VIP - FIXED ORDER ROUTING v2")
     print("========================================\n")
-    logger.info("🤖 ربات SARDAR  در حال راه‌اندازی...")
+    logger.info("🤖 ربات SARDAR در حال راه‌اندازی...")
+    logger.info("🐘 اتصال به PostgreSQL...")
+    init_database()
     logger.info("🤖 @SilverMobilStore_Bot")
     check_inventory_and_notify()
     try:
